@@ -1,0 +1,25 @@
+{
+  "Name": "项目插件目录",
+  "Version": "1.0.0",
+  "Owner": "你的名字",
+  "Intro": "独立插件条目示例，请替换占位仓库和路径后使用。",
+  "Plugins": [
+    {
+      "Name": "示例编辑器工具",
+      "Version": "1.0.0",
+      "Author": "插件作者",
+      "Intro": "下载仓库中的一个文件夹到指定本地目录。",
+      "MenuPath": "项目插件目录/编辑器/示例工具",
+      "Tags": [
+        "编辑器"
+      ],
+      "LocalPath": "Assets/ThirdParty/ExampleTool",
+      "GitURL_Path": "Tools/ExampleTool",
+      "GitURL_Username": "owner",
+      "GitURL_RepoName": "repository",
+      "GitURL_Branch": "main",
+      "IntroductionURL": "https://github.com/owner/repository",
+      "Dependencies": []
+    }
+  ]
+}
