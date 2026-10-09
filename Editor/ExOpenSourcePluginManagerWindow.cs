@@ -53,7 +53,6 @@ namespace ExOpenSource.Editor
         {
             _filterState.OnChanged -= BuildMenuTree;
             NetworkStatusMonitor.OnStatusChanged -= OnNetworkStatusChanged;
-            ExOpenSourcePluginManagerSetting.Save();
         }
 
         private void OnInspectorUpdate()
@@ -276,28 +275,23 @@ namespace ExOpenSource.Editor
         {
             _menuFiles.Clear();
             var configs = new List<ExMenuConfig>();
-            foreach (var repo in ExOpenSourcePluginManagerSetting.Instance.repoInfos)
+            string projectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+            string fullPath = MenuJsonUtility.ProjectMenuPath(projectRoot);
+            try
             {
-                var fullPath = Path.GetFullPath(Path.Combine(Application.dataPath, "../", repo.localMenuPath));
-                if (!File.Exists(fullPath)) continue;
-                try
+                string json = MenuJsonUtility.ReadProjectMenuJson(projectRoot);
+                var config = MenuJsonUtility.Parse(json, out string convertedJson);
+                if (convertedJson != null)
                 {
-                    string json = File.ReadAllText(fullPath);
-                    var config = MenuJsonUtility.Parse(json, out var convertedJson);
-                    _menuFiles.Add(config, new MenuFile { Path = fullPath, Json = json });
-                    if (convertedJson != null)
-                    {
-                        ReadMenuForChange(config);
-                        WriteMenu(config, JObject.Parse(convertedJson));
-                        _menuFiles[config].Json = convertedJson;
-                        Debug.Log($"已转换旧菜单，插件来源已独立保存: {fullPath}");
-                    }
-                    configs.Add(config);
+                    MenuJsonUtility.WriteProjectMenu(projectRoot, JObject.Parse(convertedJson));
+                    json = File.ReadAllText(fullPath, Encoding.UTF8);
                 }
-                catch (Exception e)
-                {
-                    Debug.LogError($"解析目录配置失败: {fullPath}\n{e.Message}");
-                }
+                _menuFiles.Add(config, new MenuFile { Path = fullPath, Json = json });
+                configs.Add(config);
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"解析 menu.json 失败: {fullPath}\n{e.Message}");
             }
             return configs;
         }
@@ -345,6 +339,10 @@ namespace ExOpenSource.Editor
 
             var document = ReadMenuForChange(menu);
             var plugins = (JArray)document["Plugins"];
+            if (source != null && (source.LocalPath != draft.LocalPath
+                || source.GitURL_Username != draft.GitURL_Username || source.GitURL_RepoName != draft.GitURL_RepoName
+                || source.GitURL_Path != draft.GitURL_Path || source.GitURL_Branch != draft.GitURL_Branch))
+                draft.Installation = null;
             var replacement = JObject.FromObject(draft);
             if (source == null)
                 plugins.Add(replacement);
@@ -354,6 +352,7 @@ namespace ExOpenSource.Editor
                 // 合并原版已知字段，保留 JSON 中额外的自定义字段。
                 var existing = (JObject)plugins[index];
                 foreach (var property in replacement.Properties()) existing[property.Name] = property.Value;
+                if (draft.Installation == null) existing.Remove("Installation");
             }
             string path = _menuFiles[menu].Path;
             WriteMenu(menu, document);
@@ -419,7 +418,7 @@ namespace ExOpenSource.Editor
                 + Path.DirectorySeparatorChar;
             if (!file.Path.StartsWith(configRoot, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("UI 编辑只保存到管理器自身的 Config~ 目录。");
-            if (File.ReadAllText(file.Path) != file.Json)
+            if (MenuJsonUtility.ReadProjectMenuJson(Path.GetFullPath(Path.Combine(Application.dataPath, ".."))) != file.Json)
                 throw new InvalidOperationException("菜单文件已经被修改，请取消编辑并刷新目录后重试。");
             var document = JObject.Parse(file.Json);
             if (!(document["Plugins"] is JArray)) throw new InvalidDataException("菜单必须包含 Plugins 数组。");
@@ -429,18 +428,7 @@ namespace ExOpenSource.Editor
         // 文件路径和磁盘快照由 ReadMenuForChange 检查，当前调用链在编辑器主线程完成。
         private void WriteMenu(ExMenuConfig menu, JObject document)
         {
-            string path = _menuFiles[menu].Path;
-            string temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".writing";
-            try
-            {
-                File.WriteAllText(temporaryPath, document.ToString(Formatting.Indented) + Environment.NewLine,
-                    new UTF8Encoding(false));
-                File.Replace(temporaryPath, path, null);
-            }
-            finally
-            {
-                if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
-            }
+            MenuJsonUtility.WriteProjectMenu(Path.GetFullPath(Path.Combine(Application.dataPath, "..")), document);
         }
 
         public static void RunAfterGUI(Action action)

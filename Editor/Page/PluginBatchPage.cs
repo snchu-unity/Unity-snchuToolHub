@@ -94,10 +94,11 @@ namespace ExOpenSource.Editor
                     EditorGUILayout.LabelField("已有位置", PluginInstallService.DisplayPath(installations[plugin].ExistingPath));
                     EditorGUILayout.HelpBox(installations[plugin].Message, MessageType.Warning);
                 }
-                else if (installations[plugin].Kind != PluginInstallationKind.Managed
-                    && installations[plugin].Kind != PluginInstallationKind.NotInstalled)
+                else if (installations[plugin].CanAdopt)
                     GUILayout.Label(installations[plugin].Message + "\n实际位置："
                         + PluginInstallService.DisplayPath(installations[plugin].ActualPath), ExGUIStyleHelper.BodyStyle);
+                if (!string.IsNullOrEmpty(installations[plugin].OperationError))
+                    EditorGUILayout.HelpBox(installations[plugin].OperationError, MessageType.Error);
                 EditorGUILayout.EndVertical();
             }
         }

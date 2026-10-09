@@ -61,8 +61,8 @@ namespace ExOpenSource.Editor
             if (InstallFilter != InstallFilter.All)
             {
                 var installation = PluginInstallService.GetInstallationInfo(plugin);
-                if (InstallFilter == InstallFilter.Installed && !installation.IsInstalled) return false;
-                if (InstallFilter == InstallFilter.NotInstalled && installation.IsInstalled) return false;
+                if (InstallFilter == InstallFilter.Installed && installation.Kind != PluginInstallationKind.Installed) return false;
+                if (InstallFilter == InstallFilter.NotInstalled && installation.Kind != PluginInstallationKind.NotInstalled) return false;
                 if (InstallFilter == InstallFilter.UnmanagedInstalled
                     && installation.Kind != PluginInstallationKind.UnmanagedElsewhere) return false;
             }

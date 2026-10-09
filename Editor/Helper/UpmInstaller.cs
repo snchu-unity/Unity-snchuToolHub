@@ -38,7 +38,12 @@ namespace ExOpenSource.Editor
             var manifest = JObject.Parse(File.ReadAllText(Path.Combine(projectRoot, "Packages/manifest.json"), Encoding.UTF8));
             if (!(manifest["dependencies"] is JObject dependencies))
                 throw new InvalidDataException("项目 manifest 必须包含 dependencies 对象。");
-            return dependencies.Properties().ToDictionary(p => p.Name, p => (string)p.Value, StringComparer.Ordinal);
+            return dependencies.Properties().ToDictionary(p => p.Name, p =>
+            {
+                if (p.Value.Type != JTokenType.String || string.IsNullOrWhiteSpace((string)p.Value))
+                    throw new InvalidDataException("项目 manifest 的依赖必须填写版本或来源: " + p.Name);
+                return (string)p.Value;
+            }, StringComparer.Ordinal);
         }
 
         public static string[] ReadRegistryScopes(string projectRoot)
@@ -53,11 +58,14 @@ namespace ExOpenSource.Editor
             => name.StartsWith("com.unity.", StringComparison.Ordinal)
                 || scopes.Any(scope => name == scope || name.StartsWith(scope + ".", StringComparison.Ordinal));
 
+        public static bool IsLocationSource(string source)
+            => source.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
+                || source.IndexOf("://", StringComparison.Ordinal) >= 0
+                || source.StartsWith("git@", StringComparison.Ordinal);
+
         public static string PackageSpecification(string name, string source)
         {
-            if (source.StartsWith("file:", StringComparison.OrdinalIgnoreCase)
-                || source.IndexOf("://", StringComparison.Ordinal) >= 0
-                || source.StartsWith("git@", StringComparison.Ordinal))
+            if (IsLocationSource(source))
                 return source;
             return name + "@" + source;
         }

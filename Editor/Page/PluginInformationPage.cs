@@ -22,8 +22,10 @@ namespace ExOpenSource.Editor
             EditorGUILayout.LabelField("配置目标", PluginInstallService.DisplayPath(installation.ActualPath));
             if (installation.Kind == PluginInstallationKind.UnmanagedElsewhere)
                 EditorGUILayout.LabelField("已有位置", PluginInstallService.DisplayPath(installation.ExistingPath));
-            EditorGUILayout.HelpBox(installation.Message, installation.Kind == PluginInstallationKind.Managed
-                || installation.Kind == PluginInstallationKind.NotInstalled ? MessageType.Info : MessageType.Warning);
+            EditorGUILayout.HelpBox(installation.Message, installation.Kind == PluginInstallationKind.UnmanagedElsewhere
+                || installation.CanAdopt ? MessageType.Warning : MessageType.Info);
+            if (!string.IsNullOrEmpty(installation.OperationError))
+                EditorGUILayout.HelpBox(installation.OperationError, MessageType.Error);
             EditorGUILayout.LabelField("配置版本", PluginItem.Version);
             EditorGUILayout.LabelField("作者", PluginItem.Author);
             GUILayout.Label(PluginItem.Intro ?? "", ExGUIStyleHelper.BodyStyle);
@@ -32,7 +34,7 @@ namespace ExOpenSource.Editor
             EditorGUILayout.LabelField("来源目录", PluginItem.GitURL_Path);
             EditorGUILayout.LabelField("安装目录", PluginItem.LocalPath);
             var record = PluginInstallService.FindRecord(PluginItem.LocalPath);
-            if (record != null)
+            if (installation.IsManaged)
             {
                 EditorGUILayout.LabelField("实际提交", string.IsNullOrEmpty(record.commit) ? "未知（接管后尚未更新）" : record.commit);
                 EditorGUILayout.LabelField("来源目录版本", string.IsNullOrEmpty(record.treeHash) ? "未知" : record.treeHash);

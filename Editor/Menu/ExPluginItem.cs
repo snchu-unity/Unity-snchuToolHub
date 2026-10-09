@@ -54,6 +54,10 @@ namespace ExOpenSource.Editor
 
 
         public UPMPackage[] Dependencies;
+
+        // 安装 / 接管后写回当前 menu.json；它只表示管理权和更新基线，不决定是否实际安装。
+        [Newtonsoft.Json.JsonProperty(NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore)]
+        public PluginInstallationRecord Installation;
     }
 
     [Serializable]

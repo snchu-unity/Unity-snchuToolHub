@@ -47,7 +47,7 @@ namespace ExOpenSource.Editor
 
         private void SetDraft(ExPluginItem source)
         {
-            _draft = JsonUtility.FromJson<ExPluginItem>(JsonUtility.ToJson(source));
+            _draft = Newtonsoft.Json.JsonConvert.DeserializeObject<ExPluginItem>(Newtonsoft.Json.JsonConvert.SerializeObject(source));
             // 可选文本和列表统一为空字符串 / 空列表。
             _draft.Version = _draft.Version ?? "";
             _draft.Author = _draft.Author ?? "";

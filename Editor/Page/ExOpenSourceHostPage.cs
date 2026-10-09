@@ -34,7 +34,7 @@ namespace ExOpenSource.Editor
             + "前置检查未发现已知安装，且目标目录不存在或为空，允许点击“安装”。安装入口和准备阶段会再次检查重复，发现同一插件即中断并提示位置。\n\n"
             + "3. 已安装(未托管)\n"
             + "已发现插件安装在其他位置，包括由 UPM 管理的包。当前条目不受 ToolHub 管理，全部操作按钮禁用；这里只显示已有位置和提示，由开发者自行处理。\n\n"
-            + "保存配置、加载或刷新目录时进行前置检查；目录占用或管理记录异常时，以条目的具体提示为准。";
+            + "保存配置、加载或刷新目录时检查安装情况。只有以上三种状态，历史信息不会把不存在的目录算作已安装。";
 
         /// <summary>菜单由窗口加载并校验，首页直接使用窗口缓存。</summary>
         public void DrawGUI(IEnumerable<ExMenuConfig> menus)
@@ -42,9 +42,8 @@ namespace ExOpenSource.Editor
             EnsureStyles();
             var plugins = menus.SelectMany(menu => menu.Plugins).ToList();
             var installations = plugins.Select(PluginInstallService.GetInstallationInfo).ToList();
-            int installed = installations.Count(installation => installation.IsInstalled
-                && installation.Kind != PluginInstallationKind.UnmanagedElsewhere);
-            int uninstalled = installations.Count(installation => PluginInstallService.CanOperate(installation, PluginOperationKind.Install, out _));
+            int installed = installations.Count(installation => installation.Kind == PluginInstallationKind.Installed);
+            int uninstalled = installations.Count(installation => installation.Kind == PluginInstallationKind.NotInstalled);
             int unmanaged = installations.Count(installation => installation.Kind == PluginInstallationKind.UnmanagedElsewhere);
             GUILayout.Space(8);
             GUILayout.BeginVertical(_cardStyle);
@@ -54,6 +53,14 @@ namespace ExOpenSource.Editor
             GUILayout.Space(12);
             EditorGUI.DrawRect(EditorGUILayout.GetControlRect(false, 2f), _accentColor);
             GUILayout.EndVertical();
+
+            DrawSection("使用流程",
+                "1. 添加令牌：在“设置 → 选择本地 txt”读取项目之外的本机令牌文件。\n"
+                + "2. 单个插件用“新增插件”填写来源和安装目录；同仓库多包用“仓库扫描”保存配置。\n"
+                + "3. 左侧选择插件或目录合集；跨目录多选使用“批量管理”。\n"
+                + "4. 点击“安装”：先检查整批依赖，缺少来源时停止并列出，通过后才下载插件主体；批量安装只处理允许安装的条目。\n"
+                + "5. 所有插件配置统一写入 menu.json；“设置”可打开或导入配置。\n"
+                + "安装位置：Assets 用于普通插件，Packages 用于嵌入包并由 Unity 解析依赖。");
 
             GUILayout.Space(SectionSpacing);
             GUILayout.BeginHorizontal();
@@ -68,29 +75,22 @@ namespace ExOpenSource.Editor
 
             DrawSection("三种安装状态", InstallationRules);
 
-            DrawSection("使用流程",
-                "1. 单个插件用“新增插件”填写来源和安装目录；同仓库多包用“仓库扫描”保存配置。\n"
-                + "2. 左侧选择插件或目录合集；跨目录多选使用“批量管理”。\n"
-                + "3. 点击“安装”；批量安装只处理允许安装的条目，没有可处理项时按钮变灰。\n"
-                + "4. “设置”管理菜单与 GitHub 令牌；保存后的配置可以重复使用。\n"
-                + "安装位置：Assets 用于普通插件，Packages 用于嵌入包并由 Unity 解析依赖。");
-
             DrawSection("日常维护",
                 "• 检查更新：查看远端变化和本地修改。\n"
                 + "• 更新：只替换有变化的插件；本地修改会阻止普通更新。\n"
                 + "• 重装：确认后重新准备当前分支内容，原文件先存入临时备份。\n"
                 + "• 卸载：先检查依赖，再将文件移入临时备份。删除配置只移除条目，保留已安装文件。\n"
-                + "• 缓存清理：成功、失败、取消后均清理下载、暂存和旧备份；提交失败先回滚。启动时清理中断残留，只有未完成回滚的当前恢复目录暂留。下次更新重新获取远端，安装记录保留。\n"
+                + "• 缓存清理：成功、失败、取消后清理下载、暂存和任务文件；提交失败先回滚，恢复完成后清理。下次更新重新获取远端。\n"
                 + "• 接管：登记目标的现有文件及基线，来源提交暂记未知；没有文件可接管时按钮禁用。\n"
-                + "• 管理记录异常：文件缺失可安装恢复；来源变更或旧记录缺少基线时，按条目提示处理。\n"
-                + "• 批量操作：只处理具备权限的所选项；出现重复时整批停止，目标文件和安装记录不提交。");
+                + "• 批量操作：只处理具备权限的所选项；出现重复时整批停止，目标文件和 menu.json 不提交。");
 
             DrawSection("制作理念",
                 "• 配置一次，长期复用：每个插件独立记录完整来源和安装目录。\n"
                 + "• 同仓库共享下载：按仓库和分支获取一次，再安装选中的目录。\n"
-                + "• 管理权来自安装记录或主动接管；外部插件只检测，由开发者管理。\n"
+                + "• 开发者只管理 menu.json；安装与接管所需的更新基线也保存在这份配置中。\n"
                 + "• 单包与批量使用同一流程，统一处理状态、权限、依赖和冲突。\n"
-                + "• 工具自有配置、记录和缓存集中保存；工具代码仅在编辑器运行。");
+                + "• 长期只保留 menu.json 和真正安装的插件文件；其他工作数据临时存在并自动清理。\n"
+                + "• 外部插件只检测和告知，由开发者管理；工具代码仅在编辑器运行。");
             GUILayout.Space(8);
         }
 

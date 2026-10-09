@@ -6,7 +6,7 @@ namespace ExOpenSource.Editor
     public enum PluginOperationKind { Install, CheckUpdates, Update, Reinstall, Uninstall, Adopt, Scan }
     public enum PluginOperationPhase { Idle, Preparing, Committing, Resolving, Completed, Failed, Cancelled, Interrupted }
 
-    public enum PluginInstallationKind { NotInstalled, Managed, External, Occupied, NeedsAdoption, Missing, SourceMismatch, Unavailable, UnmanagedElsewhere }
+    public enum PluginInstallationKind { NotInstalled, Installed, UnmanagedElsewhere }
 
     /// <summary>项目中已确认的安装情况及当前条目的管理权；安装时再进行实时重复检测。</summary>
     public class PluginInstallationInfo
@@ -18,9 +18,11 @@ namespace ExOpenSource.Editor
         public string ExistingPath;
         public string Message;
         public bool CanAdopt;
+        public bool IsManaged;
+        // 路径占用或配置错误只阻止操作，不增加安装状态。
+        public string OperationError;
 
-        public bool IsInstalled => Kind == PluginInstallationKind.Managed || Kind == PluginInstallationKind.External
-            || Kind == PluginInstallationKind.NeedsAdoption || Kind == PluginInstallationKind.UnmanagedElsewhere;
+        public bool IsInstalled => Kind != PluginInstallationKind.NotInstalled;
     }
 
     /// <summary>一次安装准备中的项目文件索引；不在 GUI 绘制时扫描项目。</summary>
@@ -44,7 +46,7 @@ namespace ExOpenSource.Editor
     [Serializable]
     public class PluginInstallationRecord
     {
-        // 保留原安装记录的来源字段，旧记录没有校验信息时需要显式接管。
+        // 仅保存于对应插件在 menu.json 中的 Installation 字段。
         public string name;
         public string repoUrl;
         public string targetBranch;
@@ -105,7 +107,7 @@ namespace ExOpenSource.Editor
         public float Progress;
         public bool FilesCommitted;
         public bool RecoveryRequired;
-        public bool RecordsExisted;
+        public bool MenuExisted;
         public List<PluginOperationRow> Rows = new List<PluginOperationRow>();
         public List<PluginFileChange> Changes = new List<PluginFileChange>();
         public List<PluginScanEntry> ScanEntries = new List<PluginScanEntry>();
@@ -121,6 +123,13 @@ namespace ExOpenSource.Editor
         public string Url;
         public string Branch;
         public string Commit;
+    }
+
+    /// <summary>仅保留在当前任务内存中，不创建仓库缓存或安装记录。</summary>
+    public class GitDependencySnapshot
+    {
+        public string Commit;
+        public Dictionary<string, PluginPackageDefinition> Packages = new Dictionary<string, PluginPackageDefinition>(StringComparer.Ordinal);
     }
 
     public class PluginPackageDefinition

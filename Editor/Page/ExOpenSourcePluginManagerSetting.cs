@@ -1,7 +1,8 @@
 using System;
 using System.Collections;
-using System.Collections.Generic;
 using System.IO;
+using System.Text;
+using Newtonsoft.Json.Linq;
 using Unity.EditorCoroutines.Editor;
 using UnityEditor;
 using UnityEngine;
@@ -9,354 +10,205 @@ using UnityEngine.Networking;
 
 namespace ExOpenSource.Editor
 {
-    public enum ConnectionStatus
-    {
-         Pending,
-         Checking,
-         Success,
-         Failed
-    }
+    public enum ConnectionStatus { Pending, Checking, Success, Failed }
 
-    [PLFilePath(ExOpenSourceConstParam.SETTING_ASSET_PATH)]
+    /// <summary>设置页只编辑 menu.json；令牌只从项目外 txt 读取，内容不参与 Unity 序列化。</summary>
     public class ExOpenSourcePluginManagerSetting : ExScriptableSingleton<ExOpenSourcePluginManagerSetting>
     {
-        // ════════════════════════════════════════════════════════
-        //  Tab: 令牌配置
-        // ════════════════════════════════════════════════════════
-
-
-
-
-
-
-        public string TokenFilePath = "";
-
-
-
-
-
-
-        private string showToken = "";
-
-        // ════════════════════════════════════════════════════════
-        //  Tab: 菜单配置。远端菜单地址是可选项，不作为插件的默认来源。
-        // ════════════════════════════════════════════════════════
-
-
-
-
-        // 保留原字段名，以兼容已经保存的设置。
-        public List<RepoInfo> repoInfos = new List<RepoInfo>
-        {
-            // ScriptableObject 字段初始化不能调用 AssetDatabase；OnEnable 再定位工具目录。
-            new RepoInfo { localMenuPath = "Config~/Menus/menu_ex.json" }
-        };
-        private readonly HashSet<string> _expandedMenuSources = new HashSet<string>();
-
-        // ════════════════════════════════════════════════════════
-        //  Tab: 网络检测
-        // ════════════════════════════════════════════════════════
-
-
-
-
-        private string connectionInfo =>
-            $"<color={ExBrandStyle.HexAccent}>状态:{connectionStatus}</color>  响应时间:{responseTime:0.00}ms";
-
-
-
-
-        [TextArea(1, 20)]
-
-        private string connectionMessage = "准备测试连接";
-
-
-
-
-        public void CheckConnectionToGitRepo()
-        {
-            if (isTestingConnection) return;
-
-            connectionStatus = ConnectionStatus.Checking;
-            connectionMessage = "正在测试连接...";
-            connectionStartTime = EditorApplication.timeSinceStartup;
-            debugUrl = ExOpenSourceConstParam.GITHUB_CONNECTION_TEST_URL;
-
-            isTestingConnection = true;
-            EditorCoroutineUtility.StartCoroutineOwnerless(TestConnectionCoroutine());
-        }
-
-        // ── 内部状态 ─────────────────────────────────────────────
-        private double connectionStartTime;
-        private ConnectionStatus connectionStatus = ConnectionStatus.Pending;
-        private string debugUrl;
-        private bool isTestingConnection;
-        private double responseTime;
+        public const string TokenFileEnvironmentVariable = "SNCHU_TOOLHUB_TOKEN_FILE";
+        [NonSerialized] private string _token = "";
+        // 仅在隐藏的会话对象中保留路径，脚本重载后可重新读取；不写入项目或工具文件。
+        [SerializeField] private string _tokenFilePath = "";
+        [SerializeField] private bool _useDefaultTokenFile = true;
+        private ConnectionStatus _connectionStatus;
+        private string _connectionMessage = "准备测试连接";
+        private double _connectionStartTime;
+        private double _responseTime;
+        private bool _isTestingConnection;
 
         private void OnEnable()
         {
-            // Config~ 文件引用随工具位置更新，插件安装目标保留原配置。
-            TokenFilePath = RebaseConfigurationPath(TokenFilePath);
-            for (int i = 0; i < repoInfos.Count; i++)
-            {
-                var source = repoInfos[i];
-                source.localMenuPath = RebaseConfigurationPath(source.localMenuPath);
-                repoInfos[i] = source;
-            }
+            _token = "";
+            if (_useDefaultTokenFile && string.IsNullOrEmpty(_tokenFilePath))
+                _tokenFilePath = FindDefaultTokenFile();
         }
 
-        private static string RebaseConfigurationPath(string path)
-        {
-            if (string.IsNullOrEmpty(path)) return path;
-            string normalized = path.Replace('\\', '/');
-            if (normalized.StartsWith("Config~/", StringComparison.OrdinalIgnoreCase))
-                return ExOpenSourceConstParam.TOOL_ROOT + "/" + normalized;
-            int position = normalized.LastIndexOf("/Config~/", StringComparison.OrdinalIgnoreCase);
-            return position < 0 ? path : ExOpenSourceConstParam.TOOL_ROOT + normalized.Substring(position);
-        }
-
-        private void OnDisable()  => Save();
-        private void OnDestroy()  => Save();
-        private void OnValidate() => Save();
-
-        // ── 网络检测协程 ─────────────────────────────────────────
-        private IEnumerator TestConnectionCoroutine()
-        {
-            using (var request = UnityWebRequest.Get(debugUrl))
-            {
-                request.timeout = 10;
-                request.SetRequestHeader("User-Agent", "snchuToolHub/UnityEditor-" + Application.unityVersion);
-                request.SetRequestHeader("Accept", "application/vnd.github+json");
-                string token = ReadToken();
-                if (!string.IsNullOrEmpty(token))
-                    request.SetRequestHeader("Authorization", $"token {token}");
-
-                var operation = request.SendWebRequest();
-                while (!operation.isDone)
-                {
-                    connectionMessage = $"正在连接... ({Mathf.FloorToInt(request.downloadProgress * 100)}%)";
-                    yield return null;
-                }
-
-                var totalTime = (EditorApplication.timeSinceStartup - connectionStartTime) * 1000;
-                responseTime = totalTime;
-
-                if (request.result == UnityWebRequest.Result.Success)
-                {
-                    connectionStatus = ConnectionStatus.Success;
-                    connectionMessage = $"测试地址:{debugUrl}\n连接成功！\nHTTP 状态: {request.responseCode}\n响应时间: {totalTime:0} ms";
-                }
-                else
-                {
-                    connectionStatus = ConnectionStatus.Failed;
-                    connectionMessage = HandleConnectionError(request, debugUrl);
-                }
-
-                isTestingConnection = false;
-            }
-        }
-
-        private string HandleConnectionError(UnityWebRequest request, string url)
-        {
-            return request.responseCode switch
-            {
-                401 or 403 => $"测试地址:{url}\n访问被拒绝 (HTTP {request.responseCode})\n• 检查令牌是否有效以及网络访问限制",
-                404 => $"测试地址:{url}\nGitHub 接口不可用 (HTTP 404)\n• 检查网络或代理配置",
-                429 => $"测试地址:{url}\n⚠GitHub 速率限制\n• 添加 GitHub 令牌可提高限制",
-                _ when request.result == UnityWebRequest.Result.ConnectionError =>
-                    $"测试地址:{url}\n网络连接失败\n请检查网络连接，DNS是否正常。",
-                _ => $"测试地址:{url}\n连接失败: {request.error} (HTTP {request.responseCode})"
-            };
-        }
-
+        /// <summary>未配置文件允许匿名访问；已配置但无法读取时明确报错，中断当前请求。</summary>
         public string ReadToken()
         {
-            if (string.IsNullOrEmpty(TokenFilePath))
-            {
-                showToken = "--";
-                return string.Empty;
-            }
-
-            try
-            {
-                string tokenPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", TokenFilePath));
-                if (File.Exists(tokenPath))
-                {
-                    EditorWindow.focusedWindow?.Repaint();
-                    var t = File.ReadAllText(tokenPath, System.Text.Encoding.UTF8).Trim();
-                    showToken = string.IsNullOrEmpty(t) ? "--" : "已加载";
-                    return t;
-                }
-
-                Debug.LogWarning($"令牌文件不存在: {TokenFilePath}");
-                EditorWindow.focusedWindow?.ShowNotification(new GUIContent($"令牌文件不存在: {TokenFilePath}"));
-                EditorWindow.focusedWindow?.Repaint();
-                showToken = "--";
-                return string.Empty;
-            }
-            catch (Exception e)
-            {
-                Debug.LogError($"读取令牌失败: {e.Message}");
-                EditorWindow.focusedWindow?.ShowNotification(new GUIContent($"读取令牌失败: {e.Message}"));
-                EditorWindow.focusedWindow?.Repaint();
-                showToken = "--";
-                return string.Empty;
-            }
+            if (string.IsNullOrEmpty(_token) && !string.IsNullOrEmpty(_tokenFilePath)) ReadTokenFile(_tokenFilePath);
+            return _token;
         }
 
         public void DrawGUI()
         {
-            GUILayout.Label("令牌配置", ExGUIStyleHelper.TitleStyle);
-            EditorGUILayout.HelpBox("沿用原版的令牌文件读取方式。导入文件会复制到工具自身的 Config~ 目录；界面只显示加载状态。", MessageType.Info);
-            EditorGUILayout.SelectableLabel(string.IsNullOrEmpty(TokenFilePath) ? "未选择令牌文件" : TokenFilePath,
+            GUILayout.Label("目录配置", ExGUIStyleHelper.TitleStyle);
+            EditorGUILayout.HelpBox("所有插件配置和更新基线统一保存在 menu.json。实际安装状态由项目文件和 UPM 注册结果判断。", MessageType.Info);
+            EditorGUILayout.SelectableLabel(ExOpenSourceConstParam.PROJECT_MENU_PATH,
+                EditorStyles.textField, GUILayout.Height(38));
+            EditorGUI.BeginDisabledGroup(PluginInstallService.IsBusy);
+            GUILayout.BeginHorizontal();
+            if (GUILayout.Button("打开 menu.json"))
+                ExOpenSourcePluginManagerWindow.RunAfterGUI(OpenMenu);
+            if (GUILayout.Button("导入配置"))
+                ExOpenSourcePluginManagerWindow.RunAfterGUI(ImportMenu);
+            GUILayout.EndHorizontal();
+            EditorGUI.EndDisabledGroup();
+
+            GUILayout.Space(16);
+            GUILayout.Label("GitHub 令牌（建议提前配置）", ExGUIStyleHelper.TitleStyle);
+            EditorGUILayout.HelpBox("只读取 Unity 项目和工具目录之外的本机 txt。读取一次后在当前会话复用，关闭窗口无需重选；ToolHub 不复制文件、不保存令牌内容。", MessageType.Info);
+            EditorGUILayout.SelectableLabel(string.IsNullOrEmpty(_tokenFilePath) ? "未选择本地令牌文件" : _tokenFilePath,
                 EditorStyles.textField, GUILayout.Height(38));
             GUILayout.BeginHorizontal();
-            if (GUILayout.Button("导入令牌文件")) ExOpenSourcePluginManagerWindow.RunAfterGUI(ImportTokenFile);
-            if (GUILayout.Button("打开令牌文件")) ExOpenSourcePluginManagerWindow.RunAfterGUI(OpenTokenFile);
-            if (GUILayout.Button("加载令牌"))
+            if (GUILayout.Button("选择本地 txt"))
+                ExOpenSourcePluginManagerWindow.RunAfterGUI(ReadTokenFile);
+            using (new EditorGUI.DisabledScope(string.IsNullOrEmpty(_tokenFilePath)))
             {
-                var token = ReadToken();
-                EditorWindow.focusedWindow.ShowNotification(new GUIContent(string.IsNullOrEmpty(token) ? "未加载令牌" : "令牌已加载"));
+                if (GUILayout.Button("重新读取"))
+                    ExOpenSourcePluginManagerWindow.RunAfterGUI(() => ReadTokenFile(_tokenFilePath));
+            }
+            if (GUILayout.Button("清除本次读取"))
+            {
+                _token = "";
+                _tokenFilePath = "";
+                _useDefaultTokenFile = false;
             }
             GUILayout.EndHorizontal();
-            EditorGUILayout.LabelField("令牌状态", string.IsNullOrEmpty(showToken) || showToken == "--" ? "未加载" : "已加载（隐藏内容）");
+            EditorGUILayout.LabelField("令牌状态", !string.IsNullOrEmpty(_token) ? "已读取（内容隐藏）"
+                : string.IsNullOrEmpty(_tokenFilePath) ? "未配置" : "已配置文件，使用时读取");
+            EditorGUILayout.HelpBox("免重选：在 Windows 用户环境变量中设置 " + TokenFileEnvironmentVariable
+                + "，值填写 txt 的绝对路径。ToolHub 只读取该变量，不保存令牌或路径到工具目录。", MessageType.Info);
+            if (GUILayout.Button("读取环境变量指定的文件"))
+                ExOpenSourcePluginManagerWindow.RunAfterGUI(ReadDefaultTokenFile);
             if (GUILayout.Button("打开 GitHub 令牌设置")) Application.OpenURL("https://github.com/settings/tokens");
 
             GUILayout.Space(16);
-            GUILayout.Label("菜单配置", ExGUIStyleHelper.TitleStyle);
-            EditorGUILayout.HelpBox("本地菜单 JSON 保存目录分组和插件条目。远端清单只用于下载菜单文件，插件安装来源仍由每个插件独立填写。", MessageType.Info);
-            GUILayout.BeginHorizontal();
-            if (GUILayout.Button("新建本地菜单"))
-                ExOpenSourcePluginManagerWindow.RunAfterGUI(CreateLocalMenu);
-            if (GUILayout.Button("添加远端清单"))
-            {
-                ExOpenSourcePluginManagerWindow.RunAfterGUI(() =>
-                {
-                    var source = new RepoInfo
-                    {
-                        remoteMenuPath = "menu.json",
-                        localMenuPath = ExOpenSourceConstParam.CONFIG_ROOT + "/Menus/menu_" + Guid.NewGuid().ToString("N") + ".json"
-                    };
-                    repoInfos.Add(source);
-                    _expandedMenuSources.Add(source.localMenuPath);
-                    Save();
-                });
-            }
-            GUILayout.EndHorizontal();
-
-            for (int i = 0; i < repoInfos.Count; i++)
-            {
-                var repo = repoInfos[i];
-                GUILayout.BeginVertical(EditorStyles.helpBox);
-                GUILayout.Label(Path.GetFileName(repo.localMenuPath), EditorStyles.boldLabel);
-                EditorGUILayout.LabelField("本地菜单文件");
-                EditorGUILayout.SelectableLabel(repo.localMenuPath, EditorStyles.textField, GUILayout.Height(38));
-                bool expanded = EditorGUILayout.Foldout(_expandedMenuSources.Contains(repo.localMenuPath), "远端菜单清单（可选）", true);
-                if (expanded) _expandedMenuSources.Add(repo.localMenuPath); else _expandedMenuSources.Remove(repo.localMenuPath);
-                if (expanded)
-                {
-                    EditorGUI.BeginChangeCheck();
-                    repo.userName = EditorGUILayout.DelayedTextField("清单仓库所有者", repo.userName);
-                    repo.repoName = EditorGUILayout.DelayedTextField("清单仓库名称", repo.repoName);
-                    repo.branch = EditorGUILayout.DelayedTextField("清单分支 / 标签", repo.branch);
-                    repo.remoteMenuPath = EditorGUILayout.DelayedTextField("远端 JSON 路径", repo.remoteMenuPath);
-                    if (EditorGUI.EndChangeCheck())
-                    {
-                        repoInfos[i] = repo;
-                        Save();
-                    }
-                    if (GUILayout.Button("下载 / 更新此菜单文件"))
-                    {
-                        var menuSource = repo;
-                        ExOpenSourcePluginManagerWindow.RunAfterGUI(() =>
-                        {
-                            try
-                            {
-                                MenuJsonUtility.ValidateSource(new ExPluginItem
-                                {
-                                    GitURL_Username = menuSource.userName, GitURL_RepoName = menuSource.repoName,
-                                    GitURL_Branch = menuSource.branch
-                                });
-                                PluginInstallFiles.NormalizeRelativePath(menuSource.remoteMenuPath, false);
-                                menuSource.LoadMenu();
-                            }
-                            catch (Exception error)
-                            {
-                                EditorUtility.DisplayDialog("无法下载菜单", error.Message, "确定");
-                                throw;
-                            }
-                        });
-                    }
-                }
-                GUILayout.BeginHorizontal();
-                if (GUILayout.Button("打开菜单文件")) repo.OpenMenuInExplore();
-                bool remove = GUILayout.Button("移除菜单引用");
-                GUILayout.EndHorizontal();
-                GUILayout.EndVertical();
-                if (remove)
-                {
-                    int index = i;
-                    ExOpenSourcePluginManagerWindow.RunAfterGUI(() =>
-                    {
-                        repoInfos.RemoveAt(index);
-                        Save();
-                        ExOpenSourcePluginManagerWindow.RefreshMenuTree();
-                    });
-                }
-            }
-            EditorGUILayout.HelpBox("远端菜单下载完成后会刷新目录。移除引用只取消加载该菜单，JSON 文件和已安装插件会保留。", MessageType.Info);
-
-            GUILayout.Space(16);
-            GUILayout.Label("工具文件", ExGUIStyleHelper.TitleStyle);
-            if (GUILayout.Button("打开配置目录"))
-                ExOpenSourcePluginManagerWindow.RunAfterGUI(() =>
-                {
-                    string configPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", ExOpenSourceConstParam.CONFIG_ROOT));
-                    Directory.CreateDirectory(configPath);
-                    EditorUtility.RevealInFinder(configPath);
-                });
-
-            GUILayout.Space(16);
-            GUILayout.Label("网络检测", ExGUIStyleHelper.TitleStyle);
-            if (GUILayout.Button("检测 GitHub 连接")) CheckConnectionToGitRepo();
-            GUILayout.Label(connectionInfo, ExGUIStyleHelper.BodyStyle);
-            GUILayout.Label(connectionMessage, ExGUIStyleHelper.BodyStyle);
+            GUILayout.Label("GitHub API 检测", ExGUIStyleHelper.TitleStyle);
+            EditorGUILayout.HelpBox("检测 GitHub API 的连接与认证。插件下载通过本机 Git 执行，使用 Git 自身的网络与代理配置。", MessageType.Info);
+            EditorGUI.BeginDisabledGroup(_isTestingConnection);
+            if (GUILayout.Button("检测 GitHub API"))
+                ExOpenSourcePluginManagerWindow.RunAfterGUI(CheckConnectionToGitRepo);
+            EditorGUI.EndDisabledGroup();
+            GUILayout.Label($"状态: {_connectionStatus}  响应时间: {_responseTime:0.00}ms", ExGUIStyleHelper.BodyStyle);
+            GUILayout.Label(_connectionMessage, ExGUIStyleHelper.BodyStyle);
         }
 
-        private void ImportTokenFile()
+        private static string ProjectRoot => Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
+
+        private static void OpenMenu()
         {
-            var selectedPath = EditorUtility.OpenFilePanel("选择 GitHub 令牌文本文件", "", "txt");
-            if (string.IsNullOrEmpty(selectedPath)) return;
-            var tokenPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", ExOpenSourceConstParam.TOKEN_FILE_PATH));
-            Directory.CreateDirectory(Path.GetDirectoryName(tokenPath));
-            if (!string.Equals(Path.GetFullPath(selectedPath), tokenPath, StringComparison.OrdinalIgnoreCase))
-                File.Copy(selectedPath, tokenPath, true);
-            TokenFilePath = ExOpenSourceConstParam.TOKEN_FILE_PATH;
-            Save();
-            ReadToken();
+            string path = MenuJsonUtility.ProjectMenuPath(ProjectRoot);
+            if (!File.Exists(path))
+                MenuJsonUtility.WriteProjectMenu(ProjectRoot, JObject.Parse(MenuJsonUtility.ReadProjectMenuJson(ProjectRoot)));
+            EditorUtility.OpenWithDefaultApp(path);
         }
 
-        private void OpenTokenFile()
+        private static void ImportMenu()
         {
-            var tokenPath = Path.GetFullPath(Path.Combine(Application.dataPath, "..", ExOpenSourceConstParam.TOKEN_FILE_PATH));
-            Directory.CreateDirectory(Path.GetDirectoryName(tokenPath));
-            if (!File.Exists(tokenPath)) File.WriteAllText(tokenPath, "", new System.Text.UTF8Encoding(false));
-            TokenFilePath = ExOpenSourceConstParam.TOKEN_FILE_PATH;
-            Save();
-            EditorUtility.OpenWithDefaultApp(tokenPath);
-        }
-
-        private void CreateLocalMenu()
-        {
-            string id = Guid.NewGuid().ToString("N");
-            string path = ExOpenSourceConstParam.CONFIG_ROOT + "/Menus/menu_" + id + ".json";
-            PluginInstallFiles.WriteJson(Path.GetFullPath(Path.Combine(Application.dataPath, "..", path)), new ExMenuConfig
-            {
-                Name = "插件目录-" + id.Substring(0, 6), Version = "1.0.0", Owner = "本项目", Intro = "本地插件菜单"
-            });
-            repoInfos.Add(new RepoInfo { localMenuPath = path });
-            Save();
+            string selected = EditorUtility.OpenFilePanel("选择插件目录配置", "", "json");
+            if (string.IsNullOrEmpty(selected)) return;
+            string json = File.ReadAllText(selected, Encoding.UTF8);
+            MenuJsonUtility.Parse(json, out string converted);
+            var document = JObject.Parse(converted ?? json);
+            // 导入别人的配置不等于接管本地文件，管理信息只能由本项目安装或主动接管产生。
+            foreach (JObject plugin in (JArray)document["Plugins"]) plugin.Remove("Installation");
+            if (!EditorUtility.DisplayDialog("导入插件目录",
+                "将替换当前 menu.json 中的插件配置，已安装文件保留。导入后，已有目标目录可重新接管。", "导入", "取消")) return;
+            MenuJsonUtility.WriteProjectMenu(ProjectRoot, document);
             ExOpenSourcePluginManagerWindow.RefreshMenuTree();
+        }
+
+        private void ReadTokenFile()
+        {
+            string selected = EditorUtility.OpenFilePanel("选择 GitHub 令牌文本文件", "", "txt");
+            if (string.IsNullOrEmpty(selected)) return;
+            ReadTokenFile(selected);
+        }
+
+        /// <summary>读取项目和工具目录之外的本机 txt；只在会话内保留内容，不保存或复制文件。</summary>
+        public void ReadTokenFile(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) throw new InvalidDataException("请选择本机令牌 txt 文件。");
+            string expanded = Environment.ExpandEnvironmentVariables(path.Trim());
+            if (!Path.IsPathRooted(expanded)) throw new InvalidDataException("令牌文件必须使用本机绝对路径。");
+            string fullPath = Path.GetFullPath(expanded);
+            if (!string.Equals(Path.GetExtension(fullPath), ".txt", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("令牌文件必须是 txt 文本文件。");
+            if (fullPath.StartsWith(@"\\", StringComparison.Ordinal))
+                throw new InvalidDataException("请选择本机磁盘上的令牌 txt，不使用网络共享路径。");
+            string toolRoot = Path.GetFullPath(Path.Combine(ProjectRoot, ExOpenSourceConstParam.TOOL_ROOT));
+            if (IsWithin(fullPath, ProjectRoot) || IsWithin(fullPath, toolRoot))
+                throw new InvalidDataException("令牌 txt 必须放在 Unity 项目和 snchuToolHub 目录之外，避免随项目或工具上传。");
+            string token = File.ReadAllText(fullPath, Encoding.UTF8).Trim();
+            if (token.Length == 0 || Array.Exists(token.ToCharArray(), char.IsWhiteSpace))
+                throw new InvalidDataException("令牌 txt 只能包含一行非空令牌，不要添加说明或内部空白。");
+            _tokenFilePath = fullPath;
+            _useDefaultTokenFile = true;
+            _token = token;
+        }
+
+        private static bool IsWithin(string path, string directory)
+            => path.StartsWith(directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+
+        private static string FindDefaultTokenFile()
+        {
+            string path = Environment.GetEnvironmentVariable(TokenFileEnvironmentVariable);
+            if (string.IsNullOrWhiteSpace(path) && Environment.OSVersion.Platform == PlatformID.Win32NT)
+                path = Environment.GetEnvironmentVariable(TokenFileEnvironmentVariable, EnvironmentVariableTarget.User);
+            return (path ?? "").Trim();
+        }
+
+        private void ReadDefaultTokenFile()
+        {
+            string path = FindDefaultTokenFile();
+            if (string.IsNullOrEmpty(path)) throw new InvalidDataException("尚未设置 " + TokenFileEnvironmentVariable + "，变量值应是 txt 文件路径。");
+            ReadTokenFile(path);
+        }
+
+        public void CheckConnectionToGitRepo()
+        {
+            if (_isTestingConnection) return;
+            string token;
+            try { token = ReadToken(); }
+            catch (Exception error)
+            {
+                _connectionStatus = ConnectionStatus.Failed;
+                _connectionMessage = "读取令牌文件失败: " + error.Message;
+                throw;
+            }
+            _connectionStatus = ConnectionStatus.Checking;
+            _connectionMessage = "正在测试 GitHub API...";
+            _connectionStartTime = EditorApplication.timeSinceStartup;
+            _isTestingConnection = true;
+            EditorCoroutineUtility.StartCoroutineOwnerless(TestConnectionCoroutine(token));
+        }
+
+        private IEnumerator TestConnectionCoroutine(string token)
+        {
+            string url = ExOpenSourceConstParam.GITHUB_CONNECTION_TEST_URL;
+            try
+            {
+                using (var request = UnityWebRequest.Get(url))
+                {
+                    request.timeout = 10;
+                    request.SetRequestHeader("User-Agent", "snchuToolHub/UnityEditor-" + Application.unityVersion);
+                    request.SetRequestHeader("Accept", "application/vnd.github+json");
+                    if (!string.IsNullOrEmpty(token)) request.SetRequestHeader("Authorization", "token " + token);
+                    yield return request.SendWebRequest();
+                    _responseTime = (EditorApplication.timeSinceStartup - _connectionStartTime) * 1000;
+                    _connectionStatus = request.result == UnityWebRequest.Result.Success ? ConnectionStatus.Success : ConnectionStatus.Failed;
+                    _connectionMessage = request.result == UnityWebRequest.Result.Success
+                        ? $"GitHub API 连接成功。HTTP {request.responseCode}，响应时间 {_responseTime:0} ms。"
+                        : $"GitHub API 连接失败。HTTP {request.responseCode}: {request.error}";
+                }
+            }
+            finally
+            {
+                _isTestingConnection = false;
+                EditorWindow.focusedWindow?.Repaint();
+            }
         }
     }
 }

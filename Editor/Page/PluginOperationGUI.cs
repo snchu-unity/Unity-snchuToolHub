@@ -12,6 +12,7 @@ namespace ExOpenSource.Editor
     {
         private static bool _showResults;
         private static Vector2 _resultsScroll;
+        private static Vector2 _errorScroll;
 
         public static string Label(PluginOperationKind kind)
         {
@@ -48,10 +49,10 @@ namespace ExOpenSource.Editor
                     explanation = "所选插件文件（含本地改动）将先移入临时备份，随后移除对应本地包入口。成功后清理；文件提交失败时先回滚，再清理。只有回滚未完成的恢复数据暂留。共享外部依赖会保留。";
                     break;
                 case PluginOperationKind.Reinstall:
-                    explanation = "重新下载当前分支，并覆盖所选插件的本地修改。旧文件先保存在临时备份，成功后清理；文件提交失败时先回滚，再清理。只有回滚未完成的恢复数据暂留。";
+                    explanation = "先读取包清单并检查整批依赖，缺少来源时停止并列出；通过后重新下载当前分支，并覆盖所选插件的本地修改。旧文件先保存在临时备份，成功后清理；文件提交失败时先回滚，再清理。只有回滚未完成的恢复数据暂留。";
                     break;
                 default:
-                    explanation = "按配置处理所选插件。Packages 下的包由 Unity 作为嵌入包识别，并统一解析依赖。";
+                    explanation = "先读取包清单并检查整批依赖，缺少来源时停止并列出，通过后才下载插件主体。Packages 下的包由 Unity 作为嵌入包识别，并统一解析依赖。";
                     break;
             }
             if (explanation != null && !EditorUtility.DisplayDialog(Label(kind) + "插件",
@@ -94,8 +95,14 @@ namespace ExOpenSource.Editor
             if (PluginInstallService.IsBusy)
                 EditorGUI.ProgressBar(GUILayoutUtility.GetRect(0, 18, GUILayout.ExpandWidth(true)), state.Progress,
                     PluginInstallService.IsCleaningCache ? "正在清理任务工作缓存..." : state.Message);
+            else if (state.Phase == PluginOperationPhase.Failed)
+            {
+                _errorScroll = EditorGUILayout.BeginScrollView(_errorScroll, GUILayout.MaxHeight(200));
+                EditorGUILayout.HelpBox(state.Message ?? "", MessageType.Error);
+                EditorGUILayout.EndScrollView();
+            }
             else
-                EditorGUILayout.HelpBox(state.Message ?? "", state.Phase == PluginOperationPhase.Failed ? MessageType.Error : MessageType.Info);
+                EditorGUILayout.HelpBox(state.Message ?? "", MessageType.Info);
             if (state.Rows.Count > 0)
             {
                 _showResults = EditorGUILayout.Foldout(_showResults, "各插件结果（" + state.Rows.Count + "）", true);

@@ -20,13 +20,14 @@ namespace ExOpenSource.Editor
     {
         private static readonly string ProjectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
         private static readonly string CacheRoot = Path.Combine(ProjectRoot, ExOpenSourceConstParam.CACHE_ROOT);
-        private static readonly string StatePath = Path.Combine(ProjectRoot, ExOpenSourceConstParam.CONFIG_ROOT, "PluginOperationState.json");
-        private static readonly string RecordsPath = Path.Combine(ProjectRoot, ExOpenSourceConstParam.CONFIG_ROOT, "GitPluginInstallRecords.asset");
+        private static readonly string StatePath = Path.Combine(CacheRoot, "OperationState.json");
+        private static readonly string MenuPath = MenuJsonUtility.ProjectMenuPath(ProjectRoot);
         private static readonly ConcurrentQueue<ProgressMessage> Messages = new ConcurrentQueue<ProgressMessage>();
         private static PluginInstallDatabase _database = new PluginInstallDatabase();
         private static PluginOperationState _state = new PluginOperationState();
         private static Task<PreparedBatch> _task;
         private static Task _cacheCleanupTask;
+        private static bool _cleanupRetainsState;
         private static CancellationTokenSource _cancellation;
         private static AddAndRemoveRequest _upmRequest;
         private static string _initializationError;
@@ -50,7 +51,7 @@ namespace ExOpenSource.Editor
         {
             try
             {
-                if (File.Exists(RecordsPath)) _database = PluginInstallFiles.ReadJson<PluginInstallDatabase>(RecordsPath);
+                _database = MenuJsonUtility.ReadInstallationData(ProjectRoot);
                 ValidateDatabase(_database);
                 if (File.Exists(StatePath)) _state = PluginInstallFiles.ReadJson<PluginOperationState>(StatePath);
                 ValidateState(_state);
@@ -74,7 +75,7 @@ namespace ExOpenSource.Editor
             {
                 _initializationError = error.Message;
                 _database = new PluginInstallDatabase(); // 仅供错误界面展示；EnsureAvailable 会阻止所有操作。
-                _state = new PluginOperationState { Phase = PluginOperationPhase.Failed, Message = "安装记录 / 任务状态无效: " + error.Message };
+                _state = new PluginOperationState { Phase = PluginOperationPhase.Failed, Message = "配置 / 临时任务数据无效: " + error.Message };
                 Debug.LogError(_state.Message);
             }
             EditorApplication.update += Update;
@@ -97,8 +98,6 @@ namespace ExOpenSource.Editor
 
         public static PluginInstallationInfo GetInstallationInfo(ExPluginItem plugin)
         {
-            if (_initializationError != null)
-                return InstallationInfo(PluginInstallationKind.Unavailable, "安装记录 / 状态无效", plugin.LocalPath, _initializationError, false);
             var record = FindRecord(plugin.LocalPath);
             string name = PackageNameHint(plugin, record);
             string target = Path.Combine(ProjectRoot, plugin.LocalPath);
@@ -108,7 +107,9 @@ namespace ExOpenSource.Editor
                 _nextPackageDisplayRefresh = EditorApplication.timeSinceStartup + 0.5;
             }
             var package = _displayPackages.FirstOrDefault(item => item.Name == name || PluginInstallFiles.SamePath(item.LocalPath, target));
-            return InspectInstallation(ProjectRoot, plugin, _database, package);
+            var installation = InspectInstallation(ProjectRoot, plugin, _database, package);
+            if (_initializationError != null) installation.OperationError = _initializationError;
+            return installation;
         }
 
         private static void InvalidatePackageDisplay() => _displayPackages = null;
@@ -116,6 +117,8 @@ namespace ExOpenSource.Editor
         /// <summary>保存或刷新目录时更新已注册包快照；不下载插件、不扫描项目文件。</summary>
         public static void RefreshInstallationInfo()
         {
+            _database = MenuJsonUtility.ReadInstallationData(ProjectRoot);
+            ValidateDatabase(_database);
             _displayPackages = CaptureEditorSnapshot().Packages;
             _nextPackageDisplayRefresh = EditorApplication.timeSinceStartup + 0.5;
         }
@@ -135,27 +138,18 @@ namespace ExOpenSource.Editor
                 installation.ExistingPath = existingPath;
                 return installation;
             }
-            if (record != null && !RecordMatchesSource(record, plugin))
-                return InstallationInfo(PluginInstallationKind.SourceMismatch, "来源与记录不符", target,
-                    "该目录的管理记录属于其他来源。请恢复原配置，或确认目录内容后主动接管；不会自动取得管理权。", populated);
-            if (record != null)
+            if (!populated)
             {
-                if (!populated && !occupied)
-                    return InstallationInfo(PluginInstallationKind.Missing, "文件缺失", target, "管理记录仍在，目标文件缺失。可安装恢复或清理本条记录。", false);
-                if (!string.IsNullOrEmpty(record.contentHash) && !occupied)
-                    return InstallationInfo(PluginInstallationKind.Managed, "已安装", target, "由本工具管理。安装按钮已禁用，维护操作可用。", false);
-                return InstallationInfo(PluginInstallationKind.NeedsAdoption, "旧记录，需要接管", target,
-                    "旧记录缺少文件基线，维护操作暂停。确认来源后主动接管。", populated);
+                var installation = InstallationInfo(PluginInstallationKind.NotInstalled, "未安装", target,
+                    "尚未安装，可点击“安装”。", false);
+                if (occupied) installation.OperationError = "安装目录被同名文件占用，请处理该文件后安装。";
+                return installation;
             }
-
-            if (populated && registeredPackage != null && PluginInstallFiles.SamePath(registeredPackage.LocalPath, target))
-                return InstallationInfo(PluginInstallationKind.External, "已安装", target,
-                    "目标已有 UPM 包，但没有本工具的管理记录。不会重复安装；主动接管后才允许维护。", true);
-            if (occupied || populated)
-                return InstallationInfo(PluginInstallationKind.Occupied, "目标目录已占用", target,
-                    "目标已有内容，安装已禁用。若确认这里就是配置的插件，可以主动接管；否则由开发者自行处理。", populated);
-            return InstallationInfo(PluginInstallationKind.NotInstalled, "未安装", target,
-                "前置检查未发现已知安装，配置目标不存在或为空。可以点击安装；安装入口实时复查，准备阶段再检查完整文件身份，发现重复即中断。", false);
+            bool managed = record != null && RecordMatchesSource(record, plugin) && !string.IsNullOrEmpty(record.contentHash);
+            var installed = InstallationInfo(PluginInstallationKind.Installed, "已安装", target,
+                managed ? "已安装，可更新、重装或卸载。" : "目标目录已有文件。确认是此插件后，可选择“接管现有目录”。", !managed);
+            installed.IsManaged = managed;
+            return installed;
         }
 
         /// <summary>安装入口和准备阶段的实时重复检测；前置状态判断复用同一定位逻辑。registeredPackage 可为空。</summary>
@@ -208,17 +202,21 @@ namespace ExOpenSource.Editor
 
         public static bool CanOperate(PluginInstallationInfo installation, PluginOperationKind kind, out string reason)
         {
+            if (installation.OperationError != null)
+            {
+                reason = installation.OperationError;
+                return false;
+            }
             if (installation.Kind == PluginInstallationKind.UnmanagedElsewhere)
             {
                 reason = installation.Label + "：" + installation.Message + "\n已有位置：" + DisplayPath(installation.ExistingPath);
                 return false;
             }
-            bool managed = installation.Kind == PluginInstallationKind.Managed;
-            bool missing = installation.Kind == PluginInstallationKind.Missing;
+            bool managed = installation.IsManaged;
             bool allowed = kind == PluginOperationKind.Install
-                ? installation.Kind == PluginInstallationKind.NotInstalled || missing
+                ? installation.Kind == PluginInstallationKind.NotInstalled
                 : kind == PluginOperationKind.Adopt ? installation.CanAdopt
-                : kind == PluginOperationKind.Reinstall || kind == PluginOperationKind.Uninstall ? managed || missing
+                : kind == PluginOperationKind.Reinstall || kind == PluginOperationKind.Uninstall ? managed
                 : kind == PluginOperationKind.Update || kind == PluginOperationKind.CheckUpdates ? managed : false;
             reason = allowed ? null : installation.Label + "：" + installation.Message;
             return allowed;
@@ -233,6 +231,7 @@ namespace ExOpenSource.Editor
                 return false;
             }
             EnsureAvailable();
+            RefreshInstallationInfo();
             var plugins = Clone(selection.ToList());
             ValidateSelection(plugins);
             var snapshot = CaptureEditorSnapshot();
@@ -276,7 +275,8 @@ namespace ExOpenSource.Editor
                 var repository = await GitPluginUtility.FetchAsync(CacheRoot, plugin, token,
                     message => Report(null, message, 0.1f), cancellation);
                 if (prefix.Length > 0) await GitPluginUtility.TreeHashAsync(repository, prefix, token, cancellation);
-                var manifests = await GitPluginUtility.CheckoutManifestsAsync(repository, prefix, token, cancellation);
+                var manifests = await GitPluginUtility.CheckoutManifestsAsync(repository, prefix, token, cancellation,
+                    message => Report(null, message, 0.25f));
                 foreach (string manifest in manifests)
                 {
                     cancellation.ThrowIfCancellationRequested();
@@ -412,7 +412,15 @@ namespace ExOpenSource.Editor
         private static async Task<PreparedBatch> PrepareAsync(PluginOperationKind kind, List<ExPluginItem> plugins,
             PluginInstallDatabase database, EditorSnapshot snapshot, string operationDirectory, string token, CancellationToken cancellation)
         {
-            var batch = new PreparedBatch { Database = database, ObservedDirect = UpmInstaller.ReadDirectDependencies(ProjectRoot) };
+            var batch = new PreparedBatch { Database = database, ObservedDirect = UpmInstaller.ReadDirectDependencies(ProjectRoot),
+                ObservedMenuJson = MenuJsonUtility.ReadProjectMenuJson(ProjectRoot) };
+            var configured = MenuJsonUtility.Parse(batch.ObservedMenuJson, out _).Plugins;
+            foreach (var plugin in plugins)
+                if (!configured.Any(item => PluginInstallFiles.SamePath(item.LocalPath, plugin.LocalPath)
+                    && item.MenuPath == plugin.MenuPath && item.GitURL_Username == plugin.GitURL_Username
+                    && item.GitURL_RepoName == plugin.GitURL_RepoName && item.GitURL_Branch == plugin.GitURL_Branch
+                    && item.GitURL_Path == plugin.GitURL_Path))
+                    throw new InvalidDataException("插件尚未保存到 menu.json，或配置已修改，请刷新后重试: " + plugin.Name);
             for (int i = 0; i < plugins.Count; i++)
             {
                 var plugin = plugins[i];
@@ -475,12 +483,55 @@ namespace ExOpenSource.Editor
             }
 
             var groups = batch.Items.Where(i => i.NeedsDownload).GroupBy(i => GitPluginUtility.RepositoryKey(i.Plugin)).ToList();
+            var dependencySnapshots = new Dictionary<string, GitDependencySnapshot>(StringComparer.Ordinal);
+            if (kind != PluginOperationKind.CheckUpdates)
+            {
+                // 依赖预检走 GitHub API；整批通过前不启动 Git 克隆或获取仓库树。
+                for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+                {
+                    var group = groups[groupIndex].ToList();
+                    float progress = 0.1f + 0.15f * groupIndex / groups.Count;
+                    Report(null, "依赖预检：通过 GitHub API 读取 " + group[0].Plugin.GitURL_RepoName + " 的清单...", progress);
+                    var dependencies = await GitPluginUtility.ReadDependencyManifestsAsync(group[0].Plugin,
+                        group.Select(i => i.Plugin.GitURL_Path), token, cancellation,
+                        message => Report(null, message, progress));
+                    dependencySnapshots.Add(groups[groupIndex].Key, dependencies);
+                    foreach (var item in group)
+                    {
+                        item.Package = dependencies.Packages[item.Plugin.GitURL_Path];
+                        if (item.IsPackage && item.Package == null)
+                            throw new InvalidDataException("依赖预检失败：安装到 Packages 的来源必须包含根 package.json: "
+                                + item.Plugin.Name + " (" + item.Plugin.GitURL_Path + ")。Git 尚未启动。");
+                        if (item.IsPackage && item.Previous != null && !string.IsNullOrEmpty(item.Previous.packageName)
+                            && item.Previous.packageName != item.Package.Name)
+                            throw new InvalidDataException("上游包名发生变化，请卸载旧条目并重新配置: " + item.Plugin.Name);
+                        Report(item.Plugin.LocalPath, "依赖清单已读取，等待整批预检", progress);
+                    }
+                }
+                cancellation.ThrowIfCancellationRequested();
+                Report(null, "检查整批插件的依赖及来源（Git 尚未启动）...", 0.3f);
+                PrepareDependencies(batch, snapshot);
+                cancellation.ThrowIfCancellationRequested();
+                Report(null, "依赖预检通过，开始通过 Git 获取仓库和插件文件...", 0.35f);
+            }
+
             for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
             {
                 var group = groups[groupIndex].ToList();
-                float progress = groups.Count == 0 ? 0 : 0.1f + 0.6f * groupIndex / groups.Count;
-                var repository = await GitPluginUtility.FetchAsync(CacheRoot, group[0].Plugin, token,
-                    message => Report(null, message, progress), cancellation);
+                float progress = 0.35f + 0.1f * groupIndex / groups.Count;
+                string requestedCommit = kind == PluginOperationKind.CheckUpdates ? null
+                    : dependencySnapshots[groups[groupIndex].Key].Commit;
+                GitRepositorySnapshot repository;
+                try
+                {
+                    repository = await GitPluginUtility.FetchAsync(CacheRoot, group[0].Plugin, token,
+                        message => Report(null, message, progress), cancellation, requestedCommit);
+                }
+                catch (Exception error) when (kind != PluginOperationKind.CheckUpdates && !(error is OperationCanceledException))
+                {
+                    throw new InvalidOperationException("依赖预检已通过，但 Git 获取仓库失败，插件文件尚未提交。\n"
+                        + error.Message, error);
+                }
                 foreach (var item in group)
                 {
                     item.Repository = repository;
@@ -510,9 +561,18 @@ namespace ExOpenSource.Editor
                     }
                     Report(item.Plugin.LocalPath, item.Result, progress);
                 }
-                var changed = group.Where(i => i.Changed).ToList();
+            }
+            if (kind == PluginOperationKind.CheckUpdates) return batch;
+
+            for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+            {
+                var changed = groups[groupIndex].Where(i => i.Changed).ToList();
                 if (changed.Count == 0) continue;
-                await GitPluginUtility.CheckoutDirectoriesAsync(repository, changed.Select(i => i.Plugin.GitURL_Path), token, cancellation);
+                var repository = changed[0].Repository;
+                float progress = 0.45f + 0.35f * groupIndex / groups.Count;
+                Report(null, "正在下载并检出 " + changed.Count + " 个插件目录...", progress + 0.02f);
+                await GitPluginUtility.CheckoutDirectoriesAsync(repository, changed.Select(i => i.Plugin.GitURL_Path), token, cancellation,
+                    message => Report(null, message, progress + 0.02f));
                 foreach (var item in changed)
                 {
                     cancellation.ThrowIfCancellationRequested();
@@ -522,10 +582,6 @@ namespace ExOpenSource.Editor
                     if (!Directory.Exists(PluginInstallFiles.FileSystemPath(source))) throw new DirectoryNotFoundException("仓库目录不存在: " + item.Plugin.GitURL_Path);
                     string staged = PluginInstallFiles.ContainedPath(operationDirectory, "New/" + item.Index);
                     PluginInstallFiles.CopyDirectory(source, staged, cancellation);
-                    item.Package = PluginInstallFiles.ReadPackage(staged, item.IsPackage);
-                    if (item.IsPackage && item.Previous != null && !string.IsNullOrEmpty(item.Previous.packageName)
-                        && item.Previous.packageName != item.Package.Name)
-                        throw new InvalidDataException("上游包名发生变化，请卸载旧条目并重新配置: " + item.Plugin.Name);
                     var files = PluginInstallFiles.ListFiles(staged);
                     if (files.Count == 0) throw new InvalidDataException("插件来源目录没有文件: " + item.Plugin.GitURL_Path);
                     if (item.Populated) PluginInstallFiles.PreserveGeneratedMeta(item.Destination, staged, files);
@@ -552,7 +608,6 @@ namespace ExOpenSource.Editor
                     if (PluginInstallFiles.TryFindConflict(inventory, item.Staged, item.Destination, item.Package, cancellation, out string conflict))
                         return BlockPreparation(batch, item.Plugin, conflict);
             }
-            if (kind != PluginOperationKind.CheckUpdates) PrepareDependencies(batch, snapshot);
             return batch;
         }
 
@@ -605,14 +660,46 @@ namespace ExOpenSource.Editor
                 });
             }
             foreach (string name in packages.Keys) external.Remove(name); // 同批嵌入包已经满足这些依赖。
+            var installed = new HashSet<string>(snapshot.Packages.Select(p => p.Name), StringComparer.Ordinal);
+            var sourced = new HashSet<string>(direct.Concat(external)
+                .Where(dependency => UpmInstaller.HasRegistrySource(scopes, dependency.Key)
+                    || UpmInstaller.IsLocationSource(dependency.Value)).Select(dependency => dependency.Key), StringComparer.Ordinal);
+            var missing = new SortedDictionary<string, List<string>>(StringComparer.Ordinal);
+            foreach (var dependency in external)
+                if (!sourced.Contains(dependency.Key))
+                    missing.Add(dependency.Key, batch.Items.SelectMany(item => (item.Plugin.Dependencies ?? Array.Empty<UPMPackage>())
+                        .Where(d => d.name.Trim() == dependency.Key)
+                        .Select(d => item.Plugin.Name + "（Dependencies: " + dependency.Value + "，未配置可用仓库或下载地址）")).ToList());
             foreach (var item in batch.Items.Where(i => i.Package != null))
                 foreach (var dependency in item.Package.Dependencies)
                 {
-                    if (packages.ContainsKey(dependency.Key) || snapshot.Packages.Any(p => p.Name == dependency.Key) || external.ContainsKey(dependency.Key)) continue;
+                    if (packages.ContainsKey(dependency.Key) || installed.Contains(dependency.Key)
+                        || sourced.Contains(dependency.Key)) continue;
                     if (!UpmInstaller.HasRegistrySource(scopes, dependency.Key))
-                        throw new InvalidDataException("缺少依赖“" + dependency.Key + "”：请选择对应插件，或在 Dependencies 中填写它的来源。来自 " + item.Plugin.Name);
-                    if (!item.IsPackage) external[dependency.Key] = dependency.Value;
+                    {
+                        if (!missing.TryGetValue(dependency.Key, out var consumers))
+                            missing.Add(dependency.Key, consumers = new List<string>());
+                        consumers.Add(item.Plugin.Name + "（要求 " + dependency.Value + "）");
+                    }
+                    else if (!item.IsPackage) external[dependency.Key] = dependency.Value;
                 }
+            if (missing.Count > 0)
+            {
+                foreach (var item in batch.Items)
+                {
+                    // 包清单和显式 Dependencies 都是可选输入；没有清单的 Assets 插件也能报告缺失来源。
+                    var names = (item.Package == null ? Enumerable.Empty<string>() : item.Package.Dependencies.Keys)
+                        .Concat(item.Plugin.Dependencies == null ? Enumerable.Empty<string>() : item.Plugin.Dependencies.Select(d => d.name.Trim()))
+                        .Where(missing.ContainsKey).Distinct(StringComparer.Ordinal).ToList();
+                    Report(item.Plugin.LocalPath, names.Count > 0 ? "缺少依赖来源: " + string.Join("、", names)
+                        : "未提交（本批依赖预检未通过）", 0.3f);
+                }
+                throw new InvalidDataException("依赖预检失败：缺少 " + missing.Count + " 个依赖来源，已停止，Git 尚未启动，插件主体尚未下载。\n\n"
+                    + string.Join("\n\n", missing.Select((dependency, index) => (index + 1) + ". " + dependency.Key
+                        + "\n   来自：" + string.Join("、", dependency.Value.Distinct(StringComparer.Ordinal))))
+                    + "\n\n请将对应插件选入本批安装，或在引用插件的 Dependencies 中填写来源；也可先通过 Package Manager 安装。\n"
+                    + "插件目录和 menu.json 未改动，临时缓存将自动清理。");
+            }
             foreach (var dependency in external)
             {
                 if (direct.TryGetValue(dependency.Key, out string current))
@@ -736,7 +823,9 @@ namespace ExOpenSource.Editor
                     completed.GetAwaiter().GetResult();
                     _state.Message += _state.RecoveryRequired
                         ? " 下载及其他任务缓存已清理；当前恢复目录暂留，恢复完成后清理。"
-                        : " 工作缓存已清理。";
+                        : _state.Phase == PluginOperationPhase.Resolving ? " 源码缓存已清理，仅暂留本次包解析任务。" : " 工作缓存已清理。";
+                    if (_cleanupRetainsState && !_state.RecoveryRequired && _state.Phase != PluginOperationPhase.Resolving)
+                        StartCacheCleanup();
                 }
                 catch (Exception error)
                 {
@@ -774,7 +863,7 @@ namespace ExOpenSource.Editor
             _state.ExpectedDirectDependencies = batch.Direct;
             _state.ExpectedPackages = batch.Expected;
             CommitFiles(batch);
-            // 已提交文件与包解析预期均在缓存之外；UPM 重试不再需要下载副本或旧备份。
+            // 已提交配置写入 menu.json；包解析期间只暂留缓存中的任务信息，结束后一起删除。
             StartCacheCleanup();
             if (RequiresPackageResolution) SubmitPackages();
             else Complete("操作完成。");
@@ -784,15 +873,15 @@ namespace ExOpenSource.Editor
         {
             string operation = OperationDirectory(_state.Id);
             Directory.CreateDirectory(operation);
-            _state.RecordsExisted = File.Exists(RecordsPath);
-            if (_state.RecordsExisted) File.Copy(RecordsPath, Path.Combine(operation, "records.before.json"), false);
+            _state.MenuExisted = File.Exists(MenuPath);
+            if (_state.MenuExisted) File.Copy(MenuPath, Path.Combine(operation, "menu.before.json"), false);
             _state.Changes = batch.Items.Where(i => i.Changed).Select(i => new PluginFileChange
             {
                 LocalPath = i.Plugin.LocalPath, Index = i.Index, HadDirectory = i.HadDirectory,
                 HadMeta = File.Exists(i.Destination + ".meta"), Remove = _state.Kind == PluginOperationKind.Uninstall
             }).ToList();
             _state.Phase = PluginOperationPhase.Committing;
-            _state.Message = "提交文件，保存安装记录...";
+            _state.Message = "提交文件，更新 menu.json...";
             _state.RecoveryRequired = true;
             SaveState();
             EditorApplication.LockReloadAssemblies();
@@ -803,6 +892,8 @@ namespace ExOpenSource.Editor
                 editingStarted = true;
                 // 下载期间的外部修改在提交边界再次核对，避免覆盖准备阶段之后的编辑。
                 var direct = UpmInstaller.ReadDirectDependencies(ProjectRoot);
+                if (MenuJsonUtility.ReadProjectMenuJson(ProjectRoot) != batch.ObservedMenuJson)
+                    throw new InvalidOperationException("准备期间 menu.json 已修改，请刷新配置后重新执行；插件文件未提交。");
                 if (direct.Count != batch.ObservedDirect.Count || batch.ObservedDirect.Any(p => !direct.TryGetValue(p.Key, out string value) || value != p.Value))
                     throw new InvalidOperationException("准备期间项目直接依赖发生变化，请重新执行；插件文件未提交。");
                 foreach (var item in batch.Items.Where(i => i.Changed))
@@ -828,7 +919,7 @@ namespace ExOpenSource.Editor
                         Directory.Move(staged, destination);
                     }
                 }
-                PluginInstallFiles.WriteJson(RecordsPath, batch.Database);
+                MenuJsonUtility.WriteProjectMenu(ProjectRoot, MenuJsonUtility.ApplyInstallationData(batch.ObservedMenuJson, batch.Database));
                 _database = batch.Database;
                 _state.FilesCommitted = true;
                 _state.RecoveryRequired = false;
@@ -838,6 +929,7 @@ namespace ExOpenSource.Editor
                     if (batch.Items.Any(i => i.Changed && i.Plugin.LocalPath == row.LocalPath))
                         row.Result = _state.Kind == PluginOperationKind.Uninstall ? "文件已卸载" : "文件已安装";
                 SaveState();
+                EditorApplication.delayCall += ExOpenSourcePluginManagerWindow.RefreshMenuTree;
             }
             catch
             {
@@ -954,7 +1046,7 @@ namespace ExOpenSource.Editor
                 Debug.LogException(error);
                 return;
             }
-            Fail(PluginOperationPhase.Interrupted, "上次提交被中断，已恢复原插件目录和安装记录；可以重新执行。");
+            Fail(PluginOperationPhase.Interrupted, "上次提交被中断，已恢复原插件目录和 menu.json；可以重新执行。");
             AssetDatabase.Refresh();
         }
 
@@ -982,16 +1074,16 @@ namespace ExOpenSource.Editor
                 else if (!change.HadMeta && !change.HadDirectory && !Directory.Exists(staged) && File.Exists(destination + ".meta"))
                     File.Delete(destination + ".meta");
             }
-            if (_state.RecordsExisted)
+            if (_state.MenuExisted)
             {
-                string backup = PluginInstallFiles.ContainedPath(operation, "records.before.json");
-                if (!File.Exists(backup)) throw new FileNotFoundException("缺少原安装记录备份。", backup);
-                _database = PluginInstallFiles.ReadJson<PluginInstallDatabase>(backup);
-                PluginInstallFiles.WriteJson(RecordsPath, _database);
+                string backup = PluginInstallFiles.ContainedPath(operation, "menu.before.json");
+                if (!File.Exists(backup)) throw new FileNotFoundException("缺少本次提交前的 menu.json 临时副本。", backup);
+                MenuJsonUtility.WriteProjectMenu(ProjectRoot, Newtonsoft.Json.Linq.JObject.Parse(File.ReadAllText(backup, System.Text.Encoding.UTF8)));
+                _database = MenuJsonUtility.ReadInstallationData(ProjectRoot);
             }
             else
             {
-                if (File.Exists(RecordsPath)) File.Delete(RecordsPath);
+                if (File.Exists(MenuPath)) File.Delete(MenuPath);
                 _database = new PluginInstallDatabase();
             }
             _state.FilesCommitted = false;
@@ -1034,6 +1126,9 @@ namespace ExOpenSource.Editor
 
         private static void SaveState()
         {
+            bool active = _state.Phase == PluginOperationPhase.Preparing || _state.Phase == PluginOperationPhase.Committing
+                || _state.Phase == PluginOperationPhase.Resolving || _state.RecoveryRequired;
+            if (!active) return;
             PluginInstallFiles.WriteJson(StatePath, _state);
             _lastStateSave = EditorApplication.timeSinceStartup;
         }
@@ -1071,7 +1166,9 @@ namespace ExOpenSource.Editor
             if (_task != null || IsCleaningCache || !Directory.Exists(PluginInstallFiles.FileSystemPath(CacheRoot))) return;
             // 任务标识已在创建 / 加载状态时验证；保留整个目录供 RollbackFiles 判断提交进度。
             string retained = _state.RecoveryRequired ? Path.Combine(CacheRoot, "Operations", _state.Id) : null;
-            _cacheCleanupTask = Task.Run(() => PluginInstallFiles.ClearTaskCache(CacheRoot, retained));
+            _cleanupRetainsState = _state.RecoveryRequired || _state.Phase == PluginOperationPhase.Resolving;
+            bool retainState = _cleanupRetainsState;
+            _cacheCleanupTask = Task.Run(() => PluginInstallFiles.ClearTaskCache(CacheRoot, retained, retainState));
         }
 
         private static T Clone<T>(T value) => JsonConvert.DeserializeObject<T>(JsonConvert.SerializeObject(value));
@@ -1107,6 +1204,7 @@ namespace ExOpenSource.Editor
             public string Error;
             public PluginInstallDatabase Database;
             public Dictionary<string, string> ObservedDirect;
+            public string ObservedMenuJson;
             public List<PreparedPlugin> Items = new List<PreparedPlugin>();
             public List<PluginScanEntry> ScanEntries = new List<PluginScanEntry>();
             public List<PluginPackageExpectation> Expected = new List<PluginPackageExpectation>();

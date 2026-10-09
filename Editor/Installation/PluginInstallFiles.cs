@@ -257,8 +257,36 @@ namespace ExOpenSource.Editor
         // 原生 DLL 没有 .NET 程序集身份，仍可通过资源 GUID 检测重复。
         private static string ManagedAssemblyName(string file)
         {
-            try { return AssemblyName.GetAssemblyName(FileSystemPath(file)).Name; }
-            catch (BadImageFormatException) { return null; }
+            if (!HasManagedAssemblyHeader(file)) return null;
+            return AssemblyName.GetAssemblyName(FileSystemPath(file)).Name;
+        }
+
+        // 先读取 PE 的 CLR 数据目录，避免 Mono 尝试读取原生 DLL 时向 Console 输出加载错误。
+        private static bool HasManagedAssemblyHeader(string file)
+        {
+            using (var stream = File.OpenRead(FileSystemPath(file)))
+            using (var reader = new BinaryReader(stream))
+            {
+                if (stream.Length < 64 || reader.ReadUInt16() != 0x5a4d) return false;
+                stream.Position = 0x3c;
+                uint header = reader.ReadUInt32();
+                if (header > stream.Length - 24) return false;
+                stream.Position = header;
+                if (reader.ReadUInt32() != 0x00004550) return false;
+                stream.Position = header + 20;
+                ushort optionalSize = reader.ReadUInt16();
+                long optional = header + 24L;
+                if (optionalSize < 2 || optional + optionalSize > stream.Length) return false;
+                stream.Position = optional;
+                ushort magic = reader.ReadUInt16();
+                int directoryOffset = magic == 0x10b ? 96 : magic == 0x20b ? 112 : 0;
+                // CLR Runtime Header 为第 15 个数据目录；PE32 / PE32+ 的目录起点不同。
+                if (directoryOffset == 0 || optionalSize < directoryOffset + 15 * 8) return false;
+                stream.Position = optional + directoryOffset - 4;
+                if (reader.ReadUInt32() < 15) return false;
+                stream.Position = optional + directoryOffset + 14 * 8;
+                return reader.ReadUInt32() != 0 && reader.ReadUInt32() >= 72;
+            }
         }
 
         // GUID 和脚本指纹用于补充识别；没有这些稳定标识的普通资源不能仅凭名称判定插件身份。
@@ -364,7 +392,13 @@ namespace ExOpenSource.Editor
                 if (required) throw new InvalidDataException("安装到 Packages 的来源必须包含根 package.json: " + directory);
                 return null;
             }
-            var json = JObject.Parse(File.ReadAllText(FileSystemPath(path), Encoding.UTF8));
+            return ParsePackage(File.ReadAllText(FileSystemPath(path), Encoding.UTF8), path);
+        }
+
+        /// <summary>本地清单与远端依赖预检使用同一套包配置校验。</summary>
+        public static PluginPackageDefinition ParsePackage(string text, string path)
+        {
+            var json = JObject.Parse(text);
             string name = PackageText(json, "name", false);
             string version = PackageText(json, "version", false);
             if (string.IsNullOrWhiteSpace(name) || !Regex.IsMatch(name, @"^[a-z0-9][a-z0-9._-]*$")
@@ -418,7 +452,7 @@ namespace ExOpenSource.Editor
 
         /// <summary>工作线程已停止后清理整个 Cache~。retainedOperationDirectory 可为 null；
         /// 仅回滚未完成时传入当前 Operations 子目录，完整保留其恢复数据。</summary>
-        public static void ClearTaskCache(string cacheRoot, string retainedOperationDirectory)
+        public static void ClearTaskCache(string cacheRoot, string retainedOperationDirectory, bool retainTaskState = false)
         {
             string fullRoot = Path.GetFullPath(cacheRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             if (!string.Equals(Path.GetFileName(fullRoot), "Cache~", StringComparison.Ordinal))
@@ -435,7 +469,7 @@ namespace ExOpenSource.Editor
                 ContainedPath(fullRoot, retained.Substring(fullRoot.Length + 1));
             }
             if (!Directory.Exists(FileSystemPath(fullRoot))) return;
-            if (retained == null)
+            if (retained == null && !retainTaskState)
             {
                 DeleteCacheDirectory(parent, fullRoot);
                 return;
@@ -444,6 +478,7 @@ namespace ExOpenSource.Editor
             foreach (string entry in Directory.GetFileSystemEntries(FileSystemPath(fullRoot)))
             {
                 string child = Path.Combine(fullRoot, Path.GetFileName(entry));
+                if (retainTaskState && SamePath(child, Path.Combine(fullRoot, "OperationState.json"))) continue;
                 if (!SamePath(child, operations))
                 {
                     DeleteCacheEntry(fullRoot, child);
@@ -452,7 +487,7 @@ namespace ExOpenSource.Editor
                 foreach (string operationEntry in Directory.GetFileSystemEntries(FileSystemPath(operations)))
                 {
                     string operation = Path.Combine(operations, Path.GetFileName(operationEntry));
-                    if (!SamePath(operation, retained)) DeleteCacheEntry(fullRoot, operation);
+                    if (retained == null || !SamePath(operation, retained)) DeleteCacheEntry(fullRoot, operation);
                 }
                 if (!Directory.EnumerateFileSystemEntries(FileSystemPath(operations)).Any())
                     DeleteCacheDirectory(fullRoot, operations);
